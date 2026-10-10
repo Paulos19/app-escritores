@@ -10,33 +10,22 @@ import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { HomeScreen } from './src/screens/HomeScreen';
 import { BookDetailScreen } from './src/screens/BookDetailScreen';
 import { ChapterEditorScreen } from './src/screens/ChapterEditorScreen';
-import { DimColors } from './src/theme/colors';
-import {
-  Folder,
-  Book,
-  Chapter,
-  WriterSettings,
-  AppStateCache,
-} from './src/types';
-import {
-  StorageManager,
-  defaultWriterSettings,
-} from './src/storage/storage';
+import { Book, Folder, Chapter, WriterSettings, AppStateCache } from './src/types';
+import { StorageManager, defaultSettings } from './src/storage/storage';
 
 export default function App() {
-  const [loading, setLoading] = useState(true);
-
-  // Estados principais
+  const [loading, setLoading] = useState<boolean>(true);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [books, setBooks] = useState<Book[]>([]);
-  const [settings, setSettings] = useState<WriterSettings>(defaultWriterSettings);
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [settings, setSettings] = useState<WriterSettings>(defaultSettings);
 
-  // Roteamento de Estado (Cache contínuo)
-  const [currentScreen, setCurrentScreen] = useState<'home' | 'book_detail' | 'editor'>('home');
-  const [activeBookId, setActiveBookId] = useState<string | null>(null);
-  const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  // Navegação
+  const [activeScreen, setActiveScreen] = useState<'home' | 'book-detail' | 'chapter-editor'>('home');
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
+  const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null);
 
-  // Inicialização e Recuperação do Cache de Estado (Abrir exatamente onde parou)
+  // Inicialização e recuperação de sessão
   useEffect(() => {
     async function initializeApp() {
       try {
@@ -44,33 +33,41 @@ export default function App() {
           StorageManager.getFolders(),
           StorageManager.getBooks(),
           StorageManager.getSettings(),
-          StorageManager.getStateCache(),
+          StorageManager.getCachedState(),
         ]);
 
         setFolders(savedFolders);
         setBooks(savedBooks);
-        setSettings(savedSettings);
+        if (savedSettings) {
+          setSettings(savedSettings);
+        }
 
-        // Restaurar onde parou se houver cache
+        // Recupera sessão anterior se existir
         if (stateCache) {
-          if (stateCache.lastScreen === 'editor' && stateCache.activeBookId && stateCache.activeChapterId) {
-            const bookExists = savedBooks.find((b) => b.id === stateCache.activeBookId);
-            const chapterExists = bookExists?.chapters.find((c) => c.id === stateCache.activeChapterId);
-            if (bookExists && chapterExists) {
-              setActiveBookId(stateCache.activeBookId);
-              setActiveChapterId(stateCache.activeChapterId);
-              setCurrentScreen('editor');
-            }
-          } else if (stateCache.lastScreen === 'book_detail' && stateCache.activeBookId) {
+          if (stateCache.activeFolderId) {
+            setCurrentFolderId(stateCache.activeFolderId);
+          }
+
+          if (stateCache.activeBookId) {
             const bookExists = savedBooks.find((b) => b.id === stateCache.activeBookId);
             if (bookExists) {
-              setActiveBookId(stateCache.activeBookId);
-              setCurrentScreen('book_detail');
+              setSelectedBookId(stateCache.activeBookId);
+
+              if (stateCache.activeChapterId) {
+                const chapterExists = bookExists.chapters.find((c) => c.id === stateCache.activeChapterId);
+                if (chapterExists) {
+                  setSelectedChapterId(stateCache.activeChapterId);
+                  setActiveScreen('chapter-editor');
+                  return;
+                }
+              }
+              setActiveScreen('book-detail');
+              return;
             }
           }
         }
-      } catch (err) {
-        console.error('Erro ao inicializar:', err);
+      } catch (error) {
+        console.error('Erro ao inicializar aplicação:', error);
       } finally {
         setLoading(false);
       }
@@ -79,197 +76,386 @@ export default function App() {
     initializeApp();
   }, []);
 
-  // Salvar estado sempre que a navegação mudar
-  const persistNavigationState = useCallback(
-    (screen: 'home' | 'book_detail' | 'editor', bId: string | null, cId: string | null) => {
-      setCurrentScreen(screen);
-      setActiveBookId(bId);
-      setActiveChapterId(cId);
+  // Persiste navegação
+  const persistNavigationState = useCallback(async (cache: Partial<AppStateCache>) => {
+    try {
+      await StorageManager.saveCachedState(cache);
+    } catch (err) {
+      console.error('Erro ao persistir estado de navegação:', err);
+    }
+  }, []);
 
-      const cache: AppStateCache = {
-        lastScreen: screen,
-        activeBookId: bId || undefined,
-        activeChapterId: cId || undefined,
-        lastOpenedTimestamp: Date.now(),
-      };
-      saveStateCache(cache);
-    },
-    []
-  );
-
-  // Ações de Pastas
-  const handleCreateFolder = async (name: string) => {
-    const newFolder: Folder = {
-      id: `folder_${Date.now()}`,
-      name,
-      createdAt: Date.now(),
-    };
-    const updated = [newFolder, ...folders];
-    setFolders(updated);
-    await saveFolders(updated);
+  // Handlers de Pastas
+  const handleSelectFolder = async (folderId: string | null) => {
+    setCurrentFolderId(folderId);
+    await persistNavigationState({ activeFolderId: folderId });
   };
 
-  // Ações de Livros
-  const handleCreateBook = async (title: string, folderId?: string, synopsis?: string) => {
-    const defaultPalette = ['#1e2029', '#242029', '#1d2623', '#27241e', '#23252b'];
-    const randomColor = defaultPalette[Math.floor(Math.random() * defaultPalette.length)];
-
-    const firstChapter: Chapter = {
-      id: `chap_${Date.now()}`,
-      bookId: `book_${Date.now()}`,
-      title: 'Capítulo 1',
-      content: '',
-      order: 1,
-      wordCount: 0,
+  const handleCreateFolder = async (folderData: { name: string; color: string }) => {
+    const newFolder: Folder = {
+      id: Date.now().toString(),
+      name: folderData.name,
+      color: folderData.color || '#6366F1',
+      createdAt: Date.now(),
       updatedAt: Date.now(),
     };
+    const updated = [...folders, newFolder];
+    setFolders(updated);
+    await StorageManager.saveFolders(updated);
+  };
 
+  const handleUpdateFolder = async (folderId: string, folderData: { name: string; color: string }) => {
+    const updated = folders.map((f) =>
+      f.id === folderId
+        ? { ...f, name: folderData.name, color: folderData.color, updatedAt: Date.now() }
+        : f
+    );
+    setFolders(updated);
+    await StorageManager.saveFolders(updated);
+  };
+
+  const handleDeleteFolder = async (folderId: string) => {
+    const updatedFolders = folders.filter((f) => f.id !== folderId);
+    setFolders(updatedFolders);
+    await StorageManager.saveFolders(updatedFolders);
+
+    // Desvincula livros da pasta removida
+    const updatedBooks = books.map((b) =>
+      b.folderId === folderId ? { ...b, folderId: undefined, updatedAt: Date.now() } : b
+    );
+    setBooks(updatedBooks);
+    await StorageManager.saveBooks(updatedBooks);
+
+    if (currentFolderId === folderId) {
+      setCurrentFolderId(null);
+      await persistNavigationState({ activeFolderId: null });
+    }
+  };
+
+  // Handlers de Livros
+  const handleCreateBook = async (bookData: {
+    title: string;
+    synopsis?: string;
+    genre?: string;
+    folderId?: string;
+    coverColor?: string;
+  }) => {
     const newBook: Book = {
-      id: firstChapter.bookId,
-      title,
-      synopsis,
-      folderId,
-      coverColor: randomColor,
-      chapters: [firstChapter],
+      id: Date.now().toString(),
+      title: bookData.title,
+      synopsis: bookData.synopsis,
+      genre: bookData.genre,
+      folderId: bookData.folderId || currentFolderId || undefined,
+      coverColor: bookData.coverColor || '#3B82F6',
+      chapters: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
 
     const updated = [newBook, ...books];
     setBooks(updated);
-    await saveBooks(updated);
+    await StorageManager.saveBooks(updated);
 
-    // Navegar diretamente para o novo livro
-    persistNavigationState('book_detail', newBook.id, null);
+    // Abre direto o livro criado
+    setSelectedBookId(newBook.id);
+    setSelectedChapterId(null);
+    setActiveScreen('book-detail');
+    await persistNavigationState({
+      currentScreen: 'book-detail',
+      activeBookId: newBook.id,
+      activeChapterId: null,
+    });
   };
 
-  const handleOpenBook = (bookId: string) => {
-    persistNavigationState('book_detail', bookId, null);
+  const handleOpenBook = async (bookId: string) => {
+    setSelectedBookId(bookId);
+    setSelectedChapterId(null);
+    setActiveScreen('book-detail');
+    await persistNavigationState({
+      currentScreen: 'book-detail',
+      activeBookId: bookId,
+      activeChapterId: null,
+    });
   };
 
-  // Ações de Capítulos
-  const handleCreateChapter = async (title: string) => {
-    if (!activeBookId) return;
+  const handleUpdateBook = async (
+    bookId: string,
+    bookData: {
+      title: string;
+      synopsis?: string;
+      genre?: string;
+      folderId?: string;
+      coverColor?: string;
+    }
+  ) => {
+    const updated = books.map((b) =>
+      b.id === bookId
+        ? {
+            ...b,
+            title: bookData.title,
+            synopsis: bookData.synopsis,
+            genre: bookData.genre,
+            folderId: bookData.folderId,
+            coverColor: bookData.coverColor,
+            updatedAt: Date.now(),
+          }
+        : b
+    );
+    setBooks(updated);
+    await StorageManager.saveBooks(updated);
+  };
 
-    const bookIndex = books.findIndex((b) => b.id === activeBookId);
-    if (bookIndex === -1) return;
+  const handleDeleteBook = async (bookId: string) => {
+    const updated = books.filter((b) => b.id !== bookId);
+    setBooks(updated);
+    await StorageManager.saveBooks(updated);
 
-    const targetBook = books[bookIndex];
+    if (selectedBookId === bookId) {
+      setSelectedBookId(null);
+      setSelectedChapterId(null);
+      setActiveScreen('home');
+      await persistNavigationState({
+        currentScreen: 'home',
+        activeBookId: null,
+        activeChapterId: null,
+      });
+    }
+  };
+
+  // Handlers de Capítulos
+  const handleOpenChapter = async (chapterId: string) => {
+    setSelectedChapterId(chapterId);
+    setActiveScreen('chapter-editor');
+    await persistNavigationState({
+      currentScreen: 'chapter-editor',
+      activeBookId: selectedBookId,
+      activeChapterId: chapterId,
+    });
+  };
+
+  const handleCreateChapter = async (title: string, synopsis?: string) => {
+    if (!selectedBookId) return;
+
+    const book = books.find((b) => b.id === selectedBookId);
+    if (!book) return;
+
     const newChapter: Chapter = {
-      id: `chap_${Date.now()}`,
-      bookId: targetBook.id,
+      id: Date.now().toString(),
+      bookId: selectedBookId,
       title,
+      synopsis,
       content: '',
-      order: targetBook.chapters.length + 1,
+      order: book.chapters.length + 1,
       wordCount: 0,
       updatedAt: Date.now(),
     };
 
-    const updatedBook: Book = {
-      ...targetBook,
-      chapters: [...targetBook.chapters, newChapter],
-      updatedAt: Date.now(),
-    };
-
-    const updatedBooks = [...books];
-    updatedBooks[bookIndex] = updatedBook;
+    const updatedChapters = [...book.chapters, newChapter];
+    const updatedBooks = books.map((b) =>
+      b.id === selectedBookId
+        ? { ...b, chapters: updatedChapters, updatedAt: Date.now() }
+        : b
+    );
 
     setBooks(updatedBooks);
-    await saveBooks(updatedBooks);
+    await StorageManager.saveBooks(updatedBooks);
 
-    // Abrir o capítulo recém-criado no editor
-    persistNavigationState('editor', targetBook.id, newChapter.id);
-  };
-
-  const handleOpenChapter = (chapterId: string) => {
-    if (!activeBookId) return;
-    persistNavigationState('editor', activeBookId, chapterId);
-  };
-
-  // Salvar conteúdo do capítulo (Chamado continuamente via debounced auto-save)
-  const handleSaveChapterContent = async (chapterId: string, content: string, wordCount: number) => {
-    if (!activeBookId) return;
-
-    setBooks((prevBooks) => {
-      const bIndex = prevBooks.findIndex((b) => b.id === activeBookId);
-      if (bIndex === -1) return prevBooks;
-
-      const currentBook = prevBooks[bIndex];
-      const cIndex = currentBook.chapters.findIndex((c) => c.id === chapterId);
-      if (cIndex === -1) return prevBooks;
-
-      const updatedChapter = {
-        ...currentBook.chapters[cIndex],
-        content,
-        wordCount,
-        updatedAt: Date.now(),
-      };
-
-      const updatedChapters = [...currentBook.chapters];
-      updatedChapters[cIndex] = updatedChapter;
-
-      const updatedBook = {
-        ...currentBook,
-        chapters: updatedChapters,
-        updatedAt: Date.now(),
-      };
-
-      const newBooksList = [...prevBooks];
-      newBooksList[bIndex] = updatedBook;
-
-      // Persistir em disco de forma assíncrona
-      saveBooks(newBooksList);
-      return newBooksList;
+    // Abre direto o capítulo recém-criado
+    setSelectedChapterId(newChapter.id);
+    setActiveScreen('chapter-editor');
+    await persistNavigationState({
+      currentScreen: 'chapter-editor',
+      activeBookId: selectedBookId,
+      activeChapterId: newChapter.id,
     });
   };
 
+  const handleUpdateChapter = async (chapterId: string, data: { title: string; synopsis?: string }) => {
+    if (!selectedBookId) return;
+
+    const book = books.find((b) => b.id === selectedBookId);
+    if (!book) return;
+
+    const updatedChapters = book.chapters.map((c) =>
+      c.id === chapterId
+        ? { ...c, title: data.title, synopsis: data.synopsis, updatedAt: Date.now() }
+        : c
+    );
+
+    const updatedBooks = books.map((b) =>
+      b.id === selectedBookId
+        ? { ...b, chapters: updatedChapters, updatedAt: Date.now() }
+        : b
+    );
+
+    setBooks(updatedBooks);
+    await StorageManager.saveBooks(updatedBooks);
+  };
+
+  const handleDeleteChapter = async (chapterId: string) => {
+    if (!selectedBookId) return;
+
+    const book = books.find((b) => b.id === selectedBookId);
+    if (!book) return;
+
+    const updatedChapters = book.chapters.filter((c) => c.id !== chapterId);
+    const updatedBooks = books.map((b) =>
+      b.id === selectedBookId
+        ? { ...b, chapters: updatedChapters, updatedAt: Date.now() }
+        : b
+    );
+
+    setBooks(updatedBooks);
+    await StorageManager.saveBooks(updatedBooks);
+
+    if (selectedChapterId === chapterId) {
+      setSelectedChapterId(null);
+      setActiveScreen('book-detail');
+      await persistNavigationState({
+        currentScreen: 'book-detail',
+        activeBookId: selectedBookId,
+        activeChapterId: null,
+      });
+    }
+  };
+
+  const handleReorderChapters = async (reorderedChapters: Chapter[]) => {
+    if (!selectedBookId) return;
+
+    const updatedBooks = books.map((b) =>
+      b.id === selectedBookId
+        ? { ...b, chapters: reorderedChapters, updatedAt: Date.now() }
+        : b
+    );
+
+    setBooks(updatedBooks);
+    await StorageManager.saveBooks(updatedBooks);
+  };
+
+  const handleSaveChapterContent = async (
+    chapterId: string,
+    content: string,
+    wordCount: number,
+    cursorPos?: { start: number; end: number },
+    scrollOffset?: number
+  ) => {
+    if (!selectedBookId) return;
+
+    setBooks((prevBooks) =>
+      prevBooks.map((b) => {
+        if (b.id !== selectedBookId) return b;
+        return {
+          ...b,
+          updatedAt: Date.now(),
+          chapters: b.chapters.map((c) =>
+            c.id === chapterId
+              ? {
+                  ...c,
+                  content,
+                  wordCount,
+                  lastSelectionStart: cursorPos?.start,
+                  lastSelectionEnd: cursorPos?.end,
+                  lastScrollPosition: scrollOffset,
+                  updatedAt: Date.now(),
+                }
+              : c
+          ),
+        };
+      })
+    );
+
+    await StorageManager.saveChapterContent(
+      selectedBookId,
+      chapterId,
+      content,
+      wordCount,
+      cursorPos,
+      scrollOffset
+    );
+  };
+
+  // Configurações
   const handleUpdateSettings = async (newSettings: WriterSettings) => {
     setSettings(newSettings);
-    await saveSettings(newSettings);
+    await StorageManager.saveSettings(newSettings);
+  };
+
+  // Navegação reversa
+  const handleBackToHome = async () => {
+    setActiveScreen('home');
+    setSelectedChapterId(null);
+    setSelectedBookId(null);
+    await persistNavigationState({
+      currentScreen: 'home',
+      activeBookId: null,
+      activeChapterId: null,
+    });
+  };
+
+  const handleBackToBookDetail = async () => {
+    setActiveScreen('book-detail');
+    setSelectedChapterId(null);
+    await persistNavigationState({
+      currentScreen: 'book-detail',
+      activeBookId: selectedBookId,
+      activeChapterId: null,
+    });
   };
 
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="small" color={DimColors.textMuted} />
+        <ActivityIndicator size="large" color="#4B5563" />
       </View>
     );
   }
 
-  const activeBook = books.find((b) => b.id === activeBookId);
-  const activeChapter = activeBook?.chapters.find((c) => c.id === activeChapterId);
+  const currentBook = books.find((b) => b.id === selectedBookId);
+  const currentChapter = currentBook?.chapters.find((c) => c.id === selectedChapterId);
 
   return (
     <SafeAreaProvider>
       <KeyboardProvider>
-        <SafeAreaView style={styles.safeArea}>
-          <StatusBar barStyle="light-content" backgroundColor={DimColors.bgCanvas} />
+        <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+          <StatusBar barStyle="light-content" backgroundColor="#0D0F12" />
 
-          {currentScreen === 'home' && (
+          {activeScreen === 'home' && (
             <HomeScreen
               folders={folders}
               books={books}
-              onOpenBook={handleOpenBook}
-              onCreateFolder={handleCreateFolder}
+              currentFolderId={currentFolderId}
+              onSelectFolder={handleSelectFolder}
+              onSelectBook={handleOpenBook}
               onCreateBook={handleCreateBook}
+              onUpdateBook={handleUpdateBook}
+              onDeleteBook={handleDeleteBook}
+              onCreateFolder={handleCreateFolder}
+              onUpdateFolder={handleUpdateFolder}
+              onDeleteFolder={handleDeleteFolder}
             />
           )}
 
-          {currentScreen === 'book_detail' && activeBook && (
+          {activeScreen === 'book-detail' && currentBook && (
             <BookDetailScreen
-              book={activeBook}
-              onBack={() => persistNavigationState('home', null, null)}
-              onOpenChapter={handleOpenChapter}
+              book={currentBook}
+              folders={folders}
+              onBack={handleBackToHome}
+              onSelectChapter={handleOpenChapter}
               onCreateChapter={handleCreateChapter}
+              onUpdateChapter={handleUpdateChapter}
+              onDeleteChapter={handleDeleteChapter}
+              onReorderChapters={handleReorderChapters}
+              onUpdateBook={handleUpdateBook}
+              onDeleteBook={handleDeleteBook}
             />
           )}
 
-          {currentScreen === 'editor' && activeBook && activeChapter && (
+          {activeScreen === 'chapter-editor' && currentBook && currentChapter && (
             <ChapterEditorScreen
-              book={activeBook}
-              chapter={activeChapter}
+              book={currentBook}
+              chapter={currentChapter}
               initialSettings={settings}
-              onBack={() => persistNavigationState('book_detail', activeBook.id, null)}
+              onBack={handleBackToBookDetail}
               onSaveContent={handleSaveChapterContent}
               onUpdateSettings={handleUpdateSettings}
             />
@@ -281,14 +467,14 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
+  container: {
     flex: 1,
-    backgroundColor: DimColors.bgCanvas,
+    backgroundColor: '#0D0F12',
   },
   loadingContainer: {
     flex: 1,
-    backgroundColor: DimColors.bgCanvas,
-    alignItems: 'center',
+    backgroundColor: '#0D0F12',
     justifyContent: 'center',
+    alignItems: 'center',
   },
 });
