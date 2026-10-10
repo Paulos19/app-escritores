@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Paleta Monocromática Grafite e Carvão sem pico de luz azul -->
+    <color name="bg_canvas">#131416</color>
+    <color name="bg_surface">#1B1C1F</color>
+    <color name="text_dimmed">#9898A4</color>
+</resources>
