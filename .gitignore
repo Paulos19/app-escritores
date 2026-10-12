@@ -9,8 +9,8 @@ dist/
 web-build/
 expo-env.d.ts
 
-# Native
-.kotlin/
+# Native (cache do Kotlin compiler, NÃO a pasta do projeto)
+.kotlin/metadata/
 *.orig.*
 *.jks
 *.p8
